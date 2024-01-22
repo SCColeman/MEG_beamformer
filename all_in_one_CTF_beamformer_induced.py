@@ -42,9 +42,10 @@ mne.viz.plot_events(events)
 
 #%% basic preprocessing
 
+data_3rd = data.copy().apply_gradient_compensation(grade=3)
 orig_freq = 600
 sfreq = 250
-data_ds = data.copy().resample(sfreq=sfreq)
+data_ds = data_3rd.resample(sfreq=sfreq)
 events[:,0] = np.round(events[:,0] * (sfreq/orig_freq))
 data_filt = data_ds.copy().filter(l_freq=1, h_freq=48)
 
@@ -62,7 +63,7 @@ ica.plot_sources(data_ica)
 
 #%% apply ica
 
-ica.exclude = [0, 1, 4]   # CHANGE THESE TO ECG/CARDIAC COMPONENTS
+ica.exclude = [0, 10]   # CHANGE THESE TO ECG/CARDIAC COMPONENTS
 ica.apply(data_ica)
 
 #%% epochs
@@ -173,29 +174,24 @@ stc_change = (stc_active - stc_base) / (stc_active + stc_base)
  
 stc_change.plot(src=src, subject=fs_subject,
                 subjects_dir=subjects_dir, surface="pial", hemi="both")
- 
-#%% get max voxel
- 
-peak_pos = stc_change.get_peak(mode="pos", vert_as_index=True)[0]
-peak_neg = stc_change.get_peak(mode="neg", vert_as_index=True)[0]
- 
-#%% apply beamformer to filtered raw data
+
+#%% apply beamformer to filtered raw data for timecourse extraction
  
 stc_raw = mne.beamformer.apply_lcmv_raw(data_ica, filters)
  
-#%% extract peak timecourses
+#%% extract absolute max voxel TFS/timecourse
  
-stc_pos = stc_raw.data[peak_pos]
-stc_neg = stc_raw.data[peak_neg]
-
-
-#%% make epochs from source time course
+peak = stc_change.get_peak(mode="abs", vert_as_index=True)[0]
  
-ch_names = ["pos_peak", "neg_peak"]
-ch_types = ["misc", "misc"]
+stc_peak = stc_raw.data[peak]
+
+# make fake raw object from source time course
+ 
+ch_names = ["peak"]
+ch_types = ["misc"]
 source_info = mne.create_info(ch_names=ch_names, sfreq=info["sfreq"],
                               ch_types=ch_types)
-source_raw = mne.io.RawArray([stc_pos,stc_neg], source_info)
+source_raw = mne.io.RawArray([stc_peak], source_info)
  
 source_epochs = mne.Epochs(
     source_raw,
@@ -207,7 +203,7 @@ source_epochs = mne.Epochs(
     preload=True)
  
  
-### TFR
+# TFR
  
 freqs = np.logspace(*np.log10([6, 35]), num=20)
 n_cycles = freqs/2
@@ -223,43 +219,47 @@ source_epochs_filt.apply_hilbert(envelope=True, picks="all")
 stc_epochs_filt = source_epochs_filt.average(picks="all")
 stc_epochs_filt.plot()
 
-#%% extract parcellation timecourses
+#%% extract maximum from within a parcel
 
 # get label names
 parc = "aparc"
 labels = mne.read_labels_from_annot(fs_subject, parc=parc, subjects_dir=subjects_dir)
 
-label_ts = mne.extract_label_time_course(
-    stc_raw, labels, src, mode="mean", allow_empty=True
-)
+# get induced peak within label
+label = 44   # left motor
+stc_inlabel = stc_change.in_label(labels[label])
+label_peak = stc_inlabel.get_peak(mode="abs", vert_as_index=True)[0]
 
-#%% plot TFS for parcellations by making fake raw object
+# extract timecourse of peak
+stc_label_all = mne.extract_label_time_course(stc_raw, labels[label], src, mode=None)
+stc_label_peak = stc_label_all[0][label_peak,:]
 
-ch_names = [labels[x].name for x in np.arange(len(labels))]
-ch_types = ["misc" for x in np.arange(len(labels))]
+# make fake raw object from source time course
+ch_names = ["peak"]
+ch_types = ["misc"]
 source_info = mne.create_info(ch_names=ch_names, sfreq=info["sfreq"],
                               ch_types=ch_types)
-source_raw = mne.io.RawArray(label_ts, source_info)
-
-source_epochs = mne.Epochs(
-    source_raw,
+source_label_raw = mne.io.RawArray([stc_label_peak], source_info)
+ 
+source_label_epochs = mne.Epochs(
+    source_label_raw,
     events=events,
     event_id=event_id,
     tmin=tmin,
     tmax=tmax,
     baseline=None,
     preload=True)
-
-label = 44
-
+ 
+ 
+# TFR
 freqs = np.logspace(*np.log10([6, 35]), num=20)
 n_cycles = freqs/2
-power = mne.time_frequency.tfr_morlet(source_epochs, freqs=freqs, n_cycles=n_cycles,
-                                           use_fft=True, picks=label
-                                           )
+power = mne.time_frequency.tfr_morlet(source_label_epochs, freqs=freqs, n_cycles=n_cycles,
+                                           use_fft=True, picks="all")
 power[0].plot(picks="all", baseline=(1, 1.5))
 
-source_epochs_filt = source_epochs.filter(fband[0], fband[1], picks=label).copy()
-source_epochs_filt.apply_hilbert(envelope=True, picks=label)
-stc_epochs_filt = source_epochs_filt.average(picks=label)
-stc_epochs_filt.crop(tmin=tmin+0.1, tmax=tmax-0.1).plot()
+### timecourse
+source_label_filt = source_label_epochs.filter(fband[0], fband[1], picks="all").copy()
+source_label_filt.apply_hilbert(envelope=True, picks="all")
+stc_label_filt = source_label_filt.average(picks="all")
+stc_label_filt.plot()
